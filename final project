@@ -1,0 +1,419 @@
+
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Dec  9 18:01:50 2021
+
+@author: helen
+"""
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import BaggingRegressor, RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+from scipy.stats import randint
+import os
+os.getcwd()
+#### change your current working directory
+os.chdir('C:/Users/helen/OneDrive/Documents/Stat 766/final project/Du/data1')
+df= pd.read_excel('ABTS.xlsx') # read data
+df.sample(n=5)
+peptide_name = df['peptide_name'].to_numpy() # transform the peptide name into a numpy array
+peptide_activty = df['activity'].to_numpy()# transform the peptide activity into a numpy array
+
+features= pd.read_csv('aa_553_washed_features.csv',header=0,index_col=0)
+
+### transform peptide_name into a vector for model development
+# creat a feature_for_model using the features to encode the peptide_name
+sample_size = len(peptide_name) # get the peptide sampel size
+# 130
+peptide_length = len(peptide_name[0])
+# 3
+feature_dimension = np.shape(features)[0] # get dimension of the features
+# 553
+# create matirc for feature extraction
+feature_for_model = np.empty([sample_size, peptide_length*feature_dimension])
+print(feature_for_model.shape) 
+# (130, 1659)
+for i in range(len(peptide_name)):
+    name = peptide_name[i] # extract the peptide name; maybe a tripeptide
+    try:
+        first_aa = features[name[0]].to_numpy()
+        second_aa = features[name[1]].to_numpy()
+        third_aa = features[name[2]].to_numpy()
+    except KeyError:
+        pass
+    # combine them together
+    feature_for_model[i]= np.concatenate((first_aa,second_aa,third_aa), axis=0)
+print(feature_for_model.shape)
+# (130, 1659)
+print(df['activity'].shape)
+# (130,)
+# convert features into a matrix
+X1= pd.DataFrame(feature_for_model)
+X1.shape
+# (130, 1224)
+y = df['activity']
+
+# check the multicollinearity
+
+import statsmodels.api as sm
+results = sm.OLS(y, X1).fit()
+results.summary()
+'''
+Notes:
+[1] R² is computed without centering (uncentered) since the model does not contain a constant.
+[2] Standard Errors assume that the covariance matrix of the errors is correctly specified.
+[3] The input rank is higher than the number of observations.
+[4] The smallest eigenvalue is 1.02e-29. This might indicate that there are
+strong multicollinearity problems or that the design matrix is singular.
+'''
+# controll multilinearity
+print(X1.shape)
+#(130,1659)
+
+
+cor_matrix = X1.corr().abs()
+upper_tri = cor_matrix.where(np.triu(np.ones(cor_matrix.shape),k=1).astype(np.bool))
+to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > 0.90)]
+selected=[]
+for cl in X1.columns:
+    if cl not in to_drop:
+        selected.append(cl)
+     
+X2 = X1.drop(X1.columns[to_drop], axis=1)
+print(X2.shape)
+#(130, 386)
+
+
+# scaling z = (x - mean) / standard deviation
+sc = StandardScaler() #
+X= sc.fit_transform(X2)
+X= pd.DataFrame(X)
+
+from sklearn.model_selection import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.30, random_state=11, shuffle=True)
+
+# define a function of GridSearchCV
+def grid_model(model,param_grid):
+    grid_search = GridSearchCV(model, param_grid, n_jobs=-1, cv=5, return_train_score=True,  refit=True, verbose=1)
+    grid_result = grid_search.fit(X_train, y_train)
+    print("Best: %f using %s" % (grid_result.best_score_, grid_result.best_params_))
+    return grid_result.best_score_, grid_result.best_params_
+    
+# SVR
+from sklearn.svm import SVR
+params_svr = {'kernel': ('rbf','poly'), 'C':[0.01,0.1,1,10],'gamma': [3,1,0.1],'epsilon':[0.1,0.2,0.3,0.5]}
+SVR_accuracy, SVR_params = grid_model(SVR(),params_svr)
+# Best: 0.731638 using {'C': 0.01, 'epsilon': 0.1, 'gamma': 1, 'kernel': 'poly'}
+
+# Random forest
+from sklearn.model_selection import RandomizedSearchCV
+rf = RandomForestRegressor(random_state =0)
+params_rf = dict(max_depth=randint(low=2, high=6),
+                     n_estimators=randint(low=5, high=80), 
+                     max_features=['auto','sqrt'],
+                     bootstrap= [True, False],
+                     min_samples_leaf= [1, 2, 3],
+                     min_samples_split= [2,3,4,5,6])
+rf_random = RandomizedSearchCV(estimator = rf, param_distributions = params_rf, n_iter = 200, cv = 5, verbose=2, random_state=42, n_jobs = -1)
+# Fit the random search model
+rf_result = rf_random.fit(X_train, y_train)
+print("Best: %f using %s" % (rf_result.best_score_, rf_result.best_params_))
+rf_accuracy=rf_result.best_score_
+# Best: 0.802785 using {'bootstrap': False, 'max_depth': 4, 'max_features': 'auto', 'min_samples_leaf': 1, 'min_samples_split': 3, 'n_estimators': 18}
+
+# gradient boosting
+from sklearn.ensemble import GradientBoostingRegressor
+gb = GradientBoostingRegressor(random_state=0)
+max_depth = range(1, 11, 2)
+n_estimators = range(5, 100, 10)
+learning_rate = [0.01, 0.1, 0.2, 0.3, 0.5]
+min_samples_split = [0.01, 0.1, 0.2, 0.3]
+subsample = [0.1, 0.2, 0.3, 0.5, 0.6]
+params_gb = dict(max_depth=max_depth, n_estimators =n_estimators,learning_rate=learning_rate,min_samples_split=min_samples_split,subsample=subsample )
+gb_accuracy, gb_params = grid_model(gb,params_gb)
+# Best: 0.844523 using {'learning_rate': 0.2, 'max_depth': 3, 'min_samples_split': 0.01, 'n_estimators': 15, 'subsample': 0.6}
+
+# tree based xgboost
+from xgboost import XGBRegressor
+xgb = XGBRegressor(random_state=0)
+params_xgb = dict(max_depth= range(1, 11, 2),  
+                  n_estimators = range(5, 100, 10),
+                  min_samples_split= [0.01, 0.1, 0.2, 0.3],
+                  subsample=[0.5, 0.6, 0.7], 
+                  colsample_bytree=[0.4, 0.5],
+                  eta= [0.01,0.1,0.2,0.3])
+xgb_accuracy,xgb_params = grid_model(xgb,params_xgb)
+# Best: 0.767696 using {'colsample_bytree': 0.5, 'eta': 0.3, 'max_depth': 9, 'min_samples_split': 0.01, 'n_estimators': 5, 'subsample': 0.7}
+
+# tune regularization parameters
+xgbr = XGBRegressor(**xgb_params)
+reg_alpha=[0,0.001,0.1,1]
+reg_lambda=[1,2,3,4,5,10]
+gamma=[0,1,2,3,4]
+params_xgbr = dict(reg_alpha=reg_alpha,
+                  reg_lambda=reg_lambda,
+                  gamma=gamma)
+xgbr_accuracy,xgbr_params = grid_model(xgbr,params_xgbr)
+# Best: 0.768227 using {'gamma': 0, 'reg_alpha': 0.1, 'reg_lambda': 1}
+
+# early stopping
+# X_train= pd.DataFrame(X_train)
+# y_train =pd.DataFrame(y_train)
+a= round(X_train.shape[0]/3)
+accuracy= []
+xgb = XGBRegressor(random_state=0)
+params_xgb = dict(max_depth= range(1, 11, 2),  
+                  n_estimators = range(5, 100, 10),
+                  min_samples_split= [0.01, 0.1, 0.2, 0.3],
+                  subsample=[0.5, 0.6, 0.7], 
+                  colsample_bytree=[0.4, 0.5],
+                  eta= [0.01,0.1,0.2,0.3])
+for i in range(3):
+    print(i)
+    X_test1= X_train.iloc[i*a:(i+1)*a]
+    X_test1= pd.DataFrame(X_test1)
+    y_test1= y_train.iloc[i*a:(i+1)*a]
+    X_train1= X_train.drop(X_train.index[i*a:(i+1)*a])
+    y_train1= y_train.drop(y_train.index[i*a:(i+1)*a])
+    grid_search = GridSearchCV(xgb, params_xgb, n_jobs=-1, cv=3, return_train_score=True,  refit=True, verbose=1)
+    grid_result = grid_search.fit(X_train1, y_train1)
+    eval_set = [(X_test1, y_test1)]
+    model= grid_result
+    model.fit(X_train1, y_train1, eval_metric="rmse", eval_set=eval_set, early_stopping_rounds=10, verbose=True)
+    accuracy.append(model.score(X_test1,y_test1))
+print(accuracy)
+# [0.5820105922546774, 0.751129048472611, 0.7851725844250386]
+xgb_accuracy1 = np.mean(accuracy) 
+# 0.7061040750507757 which is lower than the one before early stopping
+
+# linear based xgboost
+from xgboost import XGBRegressor
+xgb = XGBRegressor(booster= 'gblinear', random_state=0)
+params_xgb = dict(max_depth= range(1, 11, 2),  
+                  n_estimators = range(5, 100, 10),
+                  min_samples_split= [0.01, 0.1, 0.2, 0.3],
+                  subsample=[0.5, 0.6, 0.7], 
+                  colsample_bytree=[0.4, 0.5],
+                  eta= [0.01,0.1,0.2,0.3])
+xgb_accuracy,xgb_params = grid_model(xgb,params_xgb)
+# Best: 0.278198 using {'colsample_bytree': 0.4, 'eta': 0.01, 'max_depth': 1, 'min_samples_split': 0.3, 'n_estimators': 5, 'subsample': 0.5}
+
+# KNN
+from sklearn.neighbors import KNeighborsRegressor 
+knn = KNeighborsRegressor()
+params_knn={"n_neighbors": range(1, 20),'weights': ['uniform','distance']}
+knn_accuracy, knn_params = grid_model(knn,params_knn)
+# Best: 0.666383 using {'n_neighbors': 9, 'weights': 'distance'}
+
+# pls
+np.random.seed(42)
+from sklearn.cross_decomposition import PLSRegression
+pls= PLSRegression()
+params_pls={'n_components':[1,2,3,4,5,7,8,10]}
+pls_accuracy,pls_params= grid_model(pls, params_pls)
+# Best: 0.468441 using {'n_components': 2}
+
+# bagging
+np.random.seed(42)
+from sklearn.ensemble import BaggingRegressor
+bag= BaggingRegressor(random_state=0)
+params_bag={'n_estimators':[5,10,20,30], 'warm_start':[True,False]}
+bag_accuracy,bag_params= grid_model(bag, params_bag)
+# Best: 0.575822 using {'n_estimators': 5, 'warm_start': True}
+           
+# MLPR
+np.random.seed(42)
+from sklearn.neural_network import MLPRegressor
+mlp= MLPRegressor(max_iter=300, random_state=0)
+params_mlp= {'hidden_layer_sizes':[(10,10),(25, 25),(30,30),(50,50)], 'learning_rate_init': [0.01,0.05,0.1,0.5], 'early_stopping':[True, False]}
+mlp_accuracy,mlp_params = grid_model(mlp, params_mlp)
+# Best: 0.743637 using {'early_stopping': False, 'hidden_layer_sizes': (50, 50), 'learning_rate_init': 0.05}
+
+# DTR 
+np.random.seed(42)
+from sklearn.tree import DecisionTreeRegressor
+dct = DecisionTreeRegressor(random_state=0)
+params_dct={"splitter":["best","random"],
+            "max_depth" : [1,3,5,7],
+           "min_samples_leaf":[2,4,6,8,10],
+           "min_weight_fraction_leaf":[0.1,0.2,0.3],
+           "max_features":["auto","log2","sqrt"],
+           "max_leaf_nodes":[2,10,20,30]}
+dct_accuracy,dct_params = grid_model(dct, params_dct)
+# Best: 0.448399 using {'max_depth': 3, 'max_features': 'sqrt', 'max_leaf_nodes': 10, 'min_samples_leaf': 10, 'min_weight_fraction_leaf': 0.1, 'splitter': 'best'}
+
+accur = [SVR_accuracy, gb_accuracy,xgb_accuracy,rf_accuracy, knn_accuracy, pls_accuracy, bag_accuracy, mlp_accuracy, dct_accuracy]
+print(accur)
+# [0.731638, 0.844523, 0.7061040750507757, 0.802785, 0.666383, 0.468441, 0.575822, 0.743637, 0.448399]
+
+Best = max(accur)
+# 0.844523
+print(Best)
+# 0.844523
+
+# Gradientboosting won from model selection!
+gb_params= {'learning_rate': 0.2, 'max_depth': 3, 'min_samples_split': 0.01, 'n_estimators': 15, 'subsample': 0.6}
+gb= GradientBoostingRegressor(**gb_params,random_state=0)
+gb.fit(X_train, y_train)
+print('Train score:', gb.score(X_train, y_train))
+print('Test score:', gb.score(X_test, y_test))	
+y_pred_train = gb.predict(X_train)
+print('Train error:', mean_squared_error(y_train, y_pred_train,squared = True))
+y_pred = gb.predict(X_test)
+print('Test error:', mean_squared_error(y_test, y_pred,squared = True))
+'''
+Train score: 0.9798662676471019
+Test score: 0.7432715060728512
+Train error: 0.04297278416399472
+Test error: 0.5286566356396851
+'''
+
+# plot on train set
+import matplotlib.pyplot as plt
+x_ax = range(len(y_train))
+plt.scatter(x_ax, y_train, label="train_original")
+plt.scatter(x_ax, y_pred_train, label="train_predicted")
+plt.title("GradientBoosting Train data ")
+plt.legend()
+plt.show()
+  
+## plot on test set
+x_ax = range(len(y_test))
+plt.scatter(x_ax, y_test, label="original")
+plt.scatter(x_ax, y_pred, label="predicted")
+plt.title(" GradientBoosting Test data ")
+plt.legend()
+plt.show()	
+
+# Plot training and testing deviance
+test_score = np.zeros((gb_params["n_estimators"],), dtype=np.float64)
+for i, y_pred in enumerate(gb.staged_predict(X_test)):
+    test_score[i] = gb.loss_(y_test, y_pred)
+
+fig = plt.figure(figsize=(6, 6))
+plt.subplot(1, 1, 1)
+plt.title("Deviance")
+plt.plot(np.arange(gb_params["n_estimators"]) + 1, gb.train_score_, "b-", label="Training Set Deviance")
+plt.plot(np.arange(gb_params["n_estimators"]) + 1, test_score, "r-", label="Test Set Deviance")
+plt.legend(loc="upper right")
+plt.xlabel("Boosting Iterations")
+plt.ylabel("GradientBossting Deviance")
+fig.tight_layout()
+plt.show()
+
+# For end user to select model according to the threshold of importance
+
+import pandas as pd
+import numpy as np
+from sklearn.feature_selection import SelectFromModel
+from sklearn.metrics import r2_score
+thresholds = np.sort(gb.feature_importances_)
+for thresh in thresholds[-70:]:
+    # select features using threshold
+    selection = SelectFromModel(gb, threshold=thresh, prefit=True)    
+    select_X_train = selection.transform(X_train)
+    # train model
+    gb_params= {'learning_rate': 0.2, 'max_depth': 3, 'min_samples_split': 0.01, 'n_estimators': 15, 'subsample': 0.6}
+    selection_model= GradientBoostingRegressor(**gb_params,random_state=0)
+    select_X_test = selection.transform(X_test)
+    selection_model.fit(select_X_train, y_train)
+    # eval model
+    predictions = selection_model.predict(select_X_test)
+    accuracy = r2_score(y_test, predictions)
+    print("Thresh=%.3f, n=%d, Accuracy: %.2f%%" % (thresh, select_X_train.shape[1],
+        accuracy*100.0))
+'''
+Thresh=0.005, n=22, Accuracy: 81.25%
+Thresh=0.005, n=21, Accuracy: 74.61%
+Thresh=0.005, n=20, Accuracy: 79.81%
+Thresh=0.006, n=19, Accuracy: 68.14%
+Thresh=0.007, n=18, Accuracy: 68.76%
+Thresh=0.007, n=17, Accuracy: 68.92%
+Thresh=0.007, n=16, Accuracy: 75.50%
+Thresh=0.008, n=15, Accuracy: 75.13%
+Thresh=0.009, n=14, Accuracy: 68.58%
+Thresh=0.009, n=13, Accuracy: 68.69%
+Thresh=0.011, n=12, Accuracy: 71.18%
+Thresh=0.012, n=11, Accuracy: 75.67%
+Thresh=0.013, n=10, Accuracy: 69.21%
+Thresh=0.016, n=9, Accuracy: 60.92%
+Thresh=0.019, n=8, Accuracy: 69.91%
+Thresh=0.022, n=7, Accuracy: 73.62%
+Thresh=0.022, n=6, Accuracy: 56.62%
+Thresh=0.053, n=5, Accuracy: 58.97%
+Thresh=0.073, n=4, Accuracy: 62.54%
+Thresh=0.127, n=3, Accuracy: 63.04%
+Thresh=0.248, n=2, Accuracy: 63.06%
+Thresh=0.261, n=1, Accuracy: 63.27%
+'''
+# find feature importance values and index numbers at a certain threshold
+dict={}
+importances = gb.feature_importances_
+for i in range(len(importances)):
+    if importances[i] > 0.022:
+        dict[i] = importances[i]
+       
+sorted_values = sorted(dict.values(),reverse=True) # Sort the values
+selected_num={}
+selected_feature={}
+
+for i in sorted_values:
+    for k in dict.keys():
+        if dict[k] == i:
+            selected_num[k]=selected[k]
+            if selected[k]< 553:
+                selected_feature[features.index.values[selected[k]+2]]=i
+            elif selected[k]< 1106:
+                selected_feature[features.index.values[selected[k]-553+2]]=i
+            elif selected[k]< 1659:
+                selected_feature[features.index.values[selected[k]-1106+2]]=i
+
+print(selected_feature)
+'''
+{'NADH010102': 0.2614345074788945, 'TSAJ990102': 0.24842301803504765, 'ARGP820103': 0.12695089510401847,
+ 'CIDH920101': 0.07286869300578451, 'KUMS000102': 0.05260138772162107, 'BIOV880102': 0.022449720061679713,
+ 'FASG760105': 0.02203875689760158}
+'''
+# encode 130 tripeptides as the matrix of selected features for model 
+features_selected=features.loc[selected_feature.keys()]
+sample_size = len(peptide_name) # get the peptide sampel size
+# 130
+peptide_length = len(peptide_name[0])
+# 3
+feature_dimension = np.shape(features_selected)[0] # get dimension of the features
+# 553
+# create matirc for feature extraction
+feature_for_model_selected = np.empty([sample_size, peptide_length*feature_dimension])
+
+for i in range(len(peptide_name)):
+    name = peptide_name[i] # extract the peptide name; maybe a tripeptide
+    try:
+        first_aa = features_selected[name[0]].to_numpy()
+        second_aa = features_selected[name[1]].to_numpy()
+        third_aa = features_selected[name[2]].to_numpy()
+    except KeyError:
+        pass
+    # combine them together
+    feature_for_model_selected[i]= np.concatenate((first_aa,second_aa,third_aa), axis=0)
+print(feature_for_model_selected.shape)
+pd.DataFrame(feature_for_model_selected).to_csv('encoding_ABTSfeature_selected_for_model.csv')
+
+# plot feature importance
+Importance = pd.DataFrame({'Importance':selected_feature.values()}, index=selected_feature.keys())
+Importance.sort_values('Importance', axis=0, ascending=True).plot(kind='barh', color='r', )
+plt.xlabel('Feature Importance')
+plt.gca().legend_ = None
+
+from sklearn.inspection import permutation_importance
+result = permutation_importance(gb, X_test, y_test, n_repeats=10, random_state=42, n_jobs=2)
+sorted_idx = result.importances_mean.argsort()
+plt.subplot(1, 2, 2)
+plt.boxplot(result.importances[sorted_idx][-20:].T,
+    vert=False,
+    labels=np.array(feature_names)[sorted_idx][-20:])
+plt.title("Permutation Importance (test set)")
+fig.tight_layout()
+plt.show()
